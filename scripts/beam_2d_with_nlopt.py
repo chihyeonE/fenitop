@@ -29,6 +29,7 @@ from dolfinx.mesh import create_rectangle, CellType
 import petsc4py
 import nlopt
 import matplotlib.pyplot as plt
+from fenitop.fem import form_fem
 
 from fenitop.topopt import topopt
 
@@ -74,57 +75,97 @@ opt = {  # Topology optimization parameters
 }
 
 if __name__ == "__main__":
-
-    
+    comm = MPI.COMM_WORLD
     evaluation_history = []
     numevl = 1
+    cur_beta = 2
 
-    def f(v, grad):
+    def f(x, gradient):
+            t = x[0]
+            v = x[1:]
+            if gradient.size > 0:
+                gradient[0] = 1
+                gradient[1:] = 0
+            return t
+
+    def c(result, v, grad, cur_beta):
+
         global numevl
+        t = v[0]
+        x = v[1:]
 
-        f0, V, U, dJ_du, dGdu = topopt(v,fem,opt,cur_beta)
+        print(f"Optimization iteration {numevl}, Current beta: {cur_beta}")
 
-        print(np.shape(dJ_du))
+        # `topopt`로부터 `f0`, `dJ_du` 등 계산된 값들을 받아옵니다.
+        C, V, U, dCdu, dGdu = topopt(v, fem, opt, cur_beta)
+        
+
+        f0 = [-C, (0.4-V)**2]
+
+        print("Objective value (f0):", f0)
+        dJ_du = np.zeros((60*60, 2))
+        dJ_du[:,0] = -dCdu
+        dJ_du[:,1] = 2*dGdu - 0.8
+
+        # `dJ_du` 값을 확인하여 gradient가 올바른지 확인
 
         if grad.size > 0:
-            grad[:] = dJ_du.flatten()
+                grad[:,0] = -1
+                grad[:, 1:] = dJ_du.T
+
+        result[:] = np.real(f0) - t
+
         evaluation_history.append(np.real(f0))
 
-        np.savetxt("structure"+str(numevl), v)
-
-        numevl+=1
-
-        print(numevl)
-
-        return np.real(f0)
+        # 각 `v` 값을 개별 파일로 저장
+        np.savetxt(f"structure{numevl}.txt", v)
+        numevl += 1
+        #return np.real(f0)
 
     maxeval = 10
     num_betas = 10
-    cur_beta = 2
+    n = 60 * 60
+    x = 0.4 * np.ones((n,))
 
-    algorithm = nlopt.LD_MMA
-    n = 60*60
-    x = 0.5*np.ones((n,))
+    linear_problem, u_field, lambda_field, rho_field, rho_phys_field = form_fem(fem, opt)
+    centers = rho_field.function_space.tabulate_dof_coordinates()[:n].T
+    solid, void = opt["solid_zone"](centers), opt["void_zone"](centers)
+
+    lb = np.zeros((n,))
+    ub = np.ones((n,))
+    lb[solid] = 1
+    ub[void] = 0
+
+    x = np.insert(x,0,1.2)
+    lb = np.insert(lb, 0, -np.inf)
+    ub = np.insert(ub, 0, +np.inf)
+
+    tol_epi = tol_epi = np.array([1e-4] * (2))
 
     for i in range(num_betas):
-        solver = nlopt.opt(algorithm, n)
-        solver.set_lower_bounds(0)
-        solver.set_upper_bounds(1)
-        solver.set_max_objective(f)
+        solver = nlopt.opt(nlopt.LD_MMA, n+1)
+        solver.set_lower_bounds(lb)
+        solver.set_upper_bounds(ub)
+        solver.set_min_objective(f)
         solver.set_maxeval(maxeval)
-        print(x)
-        xopt = solver.optimize(x)
-        print(xopt)
+        solver.add_inequality_mconstraint(
+                    lambda rr, xx, gg: c(
+                        rr,
+                        xx,
+                        gg,
+                        cur_beta,
+                    ),
+                    tol_epi
+                )
+
+        print("Initial x:", x[:5])  # 처음 5개 요소만 출력
+        x = np.copy(solver.optimize(x))
+        print("Updated x after optimization:", x[:5])  # 업데이트 확인
+
         cur_beta *= 2
 
-    np.savetxt("evaluation_history", evaluation_history)
-
-    # plt.figure()
-    # plt.plot(evaluation_history)
-    # plt.savefig("./result.png")
-
-
-    
-
-# Execute the code in parallel:
-# mpirun -n 8 python3 scripts/beam_2d.py
+    if comm.rank == 0:
+        np.savetxt("evaluation_history.txt", evaluation_history)
+        plt.figure()
+        plt.plot(evaluation_history)
+        plt.savefig("result.png")

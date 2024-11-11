@@ -37,25 +37,26 @@ def topopt(x, fem, opt, beta):
     comm = MPI.COMM_WORLD
     linear_problem, u_field, lambda_field, rho_field, rho_phys_field = form_fem(fem, opt)
 
-    rho_field.vector_array = x.copy()
+    #rho_field.vector.array[:] = x.copy()
+    #print(x)
     
     density_filter = DensityFilter(comm, rho_field, rho_phys_field,
                                    opt["filter_radius"], fem["petsc_options"])
     heaviside = Heaviside(rho_phys_field)
     sens_problem = Sensitivity(comm, opt, linear_problem, u_field, lambda_field, rho_phys_field)
+   
     S_comm = Communicator(rho_phys_field.function_space, fem["mesh_serial"])
     if comm.rank == 0:
-        plotter = Plotter(fem["mesh_serial"])
+         plotter = Plotter(fem["mesh_serial"])
     num_consts = 1 if opt["opt_compliance"] else 2
     num_elems = rho_field.vector.array.size
-    if not opt["use_oc"]:
-        rho_old1, rho_old2 = np.zeros(num_elems), np.zeros(num_elems)
-        low, upp = None, None
+
 
     # Apply passive zones
     centers = rho_field.function_space.tabulate_dof_coordinates()[:num_elems].T
     solid, void = opt["solid_zone"](centers), opt["void_zone"](centers)
-    rho_ini = np.full(num_elems, opt["vol_frac"])
+    rho_ini = x.copy()[1:]
+    #rho_ini = np.full(num_elems, opt["vol_frac"])
     rho_ini[solid], rho_ini[void] = 0.995, 0.005
     rho_field.vector.array[:] = rho_ini
     rho_min, rho_max = np.zeros(num_elems), np.ones(num_elems)
@@ -70,6 +71,12 @@ def topopt(x, fem, opt, beta):
 
     # Compute function values and sensitivities
     [C_value, V_value, U_value], sensitivities = sens_problem.evaluate()
+
+    #print(len(sensitivities[0].getArray())) # dC_du
+    #print(len(sensitivities[1].getArray())) # dV_du
+
+    #sensitivities[0].getArray
+
     heaviside.backward(sensitivities)
     [dCdrho, dVdrho, dUdrho] = density_filter.backward(sensitivities)
     if opt["opt_compliance"]:
